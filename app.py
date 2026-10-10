@@ -4,7 +4,7 @@ import plotly.express as px
 
 st.title("EC2 Instance EDA Dashboard")
 
-df = pd.read_csv("ec2dataset.csv")
+df = pd.read_csv("ec2dataset(1).csv")
 
 st.subheader("Dataset Preview")
 st.dataframe(df)
