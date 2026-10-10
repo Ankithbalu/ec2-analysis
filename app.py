@@ -848,9 +848,9 @@ elif page == "Regression Prediction":
             "vCPU_Count": [vcpus]
         })
 
-        predicted_cost = model.predict(
+        predicted_cost = abs(model.predict(
             new_instance
-        )[0]
+        )[0])
 
         st.metric(
             "Predicted Hourly Cost",
