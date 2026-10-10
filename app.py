@@ -11,6 +11,7 @@ from sklearn.model_selection import train_test_split, KFold, cross_val_score
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
+
 st.set_page_config(
     page_title="EC2 Instance EDA Dashboard",
     page_icon="☁️",
@@ -29,17 +30,22 @@ COST_COLUMNS = [
 
 
 def extract_number(series):
-    values = series.astype("string").str.replace(
-        ",", "", regex=False
-    )
+    values = series.astype("string")
+    values = values.str.replace(",", "", regex=False)
     numbers = values.str.extract(
-        r"(-?\d+(?:\.\d+)?)"
-    )[0]
-    return pd.to_numeric(numbers, errors="coerce")
+        r"(-?\d+(?:\.\d+)?)",
+        expand=False
+    )
+
+    return pd.to_numeric(
+        numbers,
+        errors="coerce"
+    ).astype("float64")
 
 
 @st.cache_data
 def load_data():
+
     possible_files = [
         BASE / "ec2dataset.csv",
         BASE / "ec2dataset (1).csv",
@@ -47,25 +53,23 @@ def load_data():
     ]
 
     csv_file = next(
-        (file for file in possible_files if file.is_file()),
+        (f for f in possible_files if f.is_file()),
         None
     )
 
     if csv_file is None:
-        csv_files = [
-            file for file in BASE.glob("*.csv")
-            if file.is_file()
-        ]
+        all_csv_files = list(BASE.glob("*.csv"))
 
-        if len(csv_files) == 1:
-            csv_file = csv_files[0]
+        if len(all_csv_files) == 1:
+            csv_file = all_csv_files[0]
         else:
             raise FileNotFoundError(
-                "Dataset not found. Please upload ec2dataset.csv "
-                "or ec2dataset (1).csv to your GitHub repository."
+                "EC2 CSV dataset was not found. "
+                "Upload ec2dataset.csv or ec2dataset (1).csv."
             )
 
     df = pd.read_csv(csv_file)
+
     df.columns = df.columns.str.strip()
 
     required_columns = [
@@ -82,51 +86,66 @@ def load_data():
 
     if missing_columns:
         raise ValueError(
-            f"Missing required columns: {missing_columns}"
+            f"Missing columns: {missing_columns}"
         )
 
     for col in COST_COLUMNS:
         df[col] = extract_number(df[col])
-        df.loc[df[col] < 0, col] = np.nan
+        df[col] = df[col].mask(df[col] < 0, np.nan)
 
-    df["Memory_GiB"] = extract_number(df["Instance Memory"])
-    df["vCPU_Count"] = extract_number(df["vCPUs"])
+    df["Memory_GiB"] = extract_number(
+        df["Instance Memory"]
+    )
+
+    df["vCPU_Count"] = extract_number(
+        df["vCPUs"]
+    )
 
     df["Family"] = (
         df["API Name"]
-        .astype("string")
+        .fillna("Unknown")
+        .astype(str)
         .str.split(".")
         .str[0]
         .str.lower()
     )
 
-    df["Monthly_Cost_730h"] = df["On Demand"] * 730
-
-    df["Cost_Per_vCPU"] = np.where(
-        df["vCPU_Count"] > 0,
-        df["On Demand"] / df["vCPU_Count"],
-        np.nan
+    df["Monthly_Cost_730h"] = (
+        df["On Demand"] * 730
     )
 
-    df["Cost_Per_GiB"] = np.where(
-        df["Memory_GiB"] > 0,
-        df["On Demand"] / df["Memory_GiB"],
-        np.nan
+    df["Cost_Per_vCPU"] = (
+        df["On Demand"] /
+        df["vCPU_Count"].replace(0, np.nan)
     )
 
-    df["Savings_Percent"] = np.where(
-        df["On Demand"] > 0,
+    df["Cost_Per_GiB"] = (
+        df["On Demand"] /
+        df["Memory_GiB"].replace(0, np.nan)
+    )
+
+    df["Savings_Percent"] = np.nan
+
+    valid_savings = (
+        df["On Demand"].notna() &
+        df["Linux Reserved cost"].notna() &
+        (df["On Demand"] > 0)
+    )
+
+    df.loc[valid_savings, "Savings_Percent"] = (
         (
-            df["On Demand"] - df["Linux Reserved cost"]
-        ) / df["On Demand"] * 100,
-        np.nan
-    )
+            df.loc[valid_savings, "On Demand"] -
+            df.loc[valid_savings, "Linux Reserved cost"]
+        ) /
+        df.loc[valid_savings, "On Demand"]
+    ) * 100
 
     return df, csv_file.name
 
 
 try:
     data, filename = load_data()
+
 except Exception as e:
     st.error(f"Unable to load EC2 dataset: {e}")
     st.stop()
@@ -134,14 +153,15 @@ except Exception as e:
 
 st.title("☁️ EC2 Instance EDA Dashboard")
 
-st.write(
-    "Amazon EC2 Cost Analysis and Machine Learning "
-    "Prediction Dashboard"
+st.markdown(
+    "Analyze Amazon EC2 instance costs, compare pricing models, "
+    "detect outliers, optimize resources, and predict costs "
+    "using machine learning."
 )
 
-st.caption(f"Dataset loaded: {filename}")
+st.caption(f"Dataset loaded successfully: {filename}")
 
-st.sidebar.title("Navigation")
+st.sidebar.title("Dashboard Navigation")
 
 page = st.sidebar.radio(
     "Select Analysis",
@@ -156,24 +176,30 @@ page = st.sidebar.radio(
 )
 
 st.sidebar.divider()
-st.sidebar.write("INFO49971 - Cloud Economics")
+st.sidebar.caption("INFO49971 - Cloud Economics")
 
 
 if page == "Dataset Overview":
 
-    st.header("Dataset Overview")
+    st.header("EC2 Dataset Overview")
 
-    col1, col2, col3, col4 = st.columns(4)
+    c1, c2, c3, c4 = st.columns(4)
 
-    col1.metric("Total Instances", len(data))
-    col2.metric("Total Columns", len(data.columns))
-    col3.metric(
+    c1.metric("Total Instances", len(data))
+
+    c2.metric(
+        "Original Columns",
+        len(data.columns) - 7
+    )
+
+    c3.metric(
         "Instance Families",
         data["Family"].nunique()
     )
-    col4.metric(
+
+    c4.metric(
         "Missing On-Demand Prices",
-        data["On Demand"].isna().sum()
+        int(data["On Demand"].isna().sum())
     )
 
     st.subheader("Dataset Preview")
@@ -183,14 +209,19 @@ if page == "Dataset Overview":
         use_container_width=True
     )
 
-    st.subheader("Dataset Structure")
+    st.subheader("Dataset Information")
 
     st.write("Column Names")
+
     st.write(data.columns.tolist())
 
     st.write("Data Types")
+
+    types = data.dtypes.astype(str).reset_index()
+    types.columns = ["Column", "Data Type"]
+
     st.dataframe(
-        data.dtypes.astype(str).rename("Data Type"),
+        types,
         use_container_width=True
     )
 
@@ -214,53 +245,56 @@ if page == "Dataset Overview":
 
 elif page == "Cost Analysis":
 
-    st.header("EC2 Pricing Analysis")
+    st.header("EC2 Cost Analysis")
 
-    selected_cost = st.selectbox(
+    cost_type = st.selectbox(
         "Select Pricing Option",
         COST_COLUMNS
     )
 
-    valid_prices = data[selected_cost].dropna()
+    prices = data[cost_type].dropna()
 
-    if valid_prices.empty:
-        st.warning("No valid prices are available.")
+    if prices.empty:
+        st.warning("No valid pricing data available.")
         st.stop()
 
-    col1, col2, col3, col4 = st.columns(4)
+    c1, c2, c3, c4 = st.columns(4)
 
-    col1.metric(
+    c1.metric(
         "Average Hourly Cost",
-        f"${valid_prices.mean():.4f}"
+        f"${prices.mean():.4f}"
     )
 
-    col2.metric(
+    c2.metric(
         "Median Hourly Cost",
-        f"${valid_prices.median():.4f}"
+        f"${prices.median():.4f}"
     )
 
-    col3.metric(
+    c3.metric(
         "Minimum Hourly Cost",
-        f"${valid_prices.min():.4f}"
+        f"${prices.min():.4f}"
     )
 
-    col4.metric(
+    c4.metric(
         "Maximum Hourly Cost",
-        f"${valid_prices.max():.4f}"
+        f"${prices.max():.4f}"
     )
 
     st.subheader("Cost Distribution")
 
     fig = px.histogram(
         data,
-        x=selected_cost,
+        x=cost_type,
         nbins=50,
-        title=f"{selected_cost} Cost Distribution"
+        title=f"{cost_type} Price Distribution"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
-    st.subheader("All Pricing Options Comparison")
+    st.subheader("Pricing Comparison Boxplot")
 
     melted = data[COST_COLUMNS].melt(
         var_name="Pricing Type",
@@ -272,27 +306,39 @@ elif page == "Cost Analysis":
         x="Pricing Type",
         y="Hourly Cost",
         color="Pricing Type",
-        title="EC2 Hourly Price Comparison"
+        title="EC2 Pricing Distribution"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
-    st.subheader("Average Hourly Costs")
+    st.subheader("Average Prices")
 
-    average = data[COST_COLUMNS].mean().reset_index()
-    average.columns = ["Pricing Type", "Average Cost"]
+    average_prices = (
+        data[COST_COLUMNS].mean().reset_index()
+    )
+
+    average_prices.columns = [
+        "Pricing Type",
+        "Average Hourly Cost"
+    ]
 
     fig = px.bar(
-        average,
+        average_prices,
         x="Pricing Type",
-        y="Average Cost",
+        y="Average Hourly Cost",
         color="Pricing Type",
-        title="Average EC2 Cost by Pricing Option"
+        title="Average EC2 Hourly Cost"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
-    st.subheader("Cost Summary Table")
+    st.subheader("Cost Summary Statistics")
 
     st.dataframe(
         data[COST_COLUMNS].describe(),
@@ -302,17 +348,16 @@ elif page == "Cost Analysis":
 
 elif page == "Outlier Detection":
 
-    st.header("On-Demand Cost Outlier Detection")
+    st.header("EC2 Cost Outlier Detection")
 
     values = data["On Demand"].dropna()
 
     if values.empty:
-        st.warning("No valid On-Demand prices available.")
+        st.warning("No On-Demand prices available.")
         st.stop()
 
     q1 = values.quantile(0.25)
     q3 = values.quantile(0.75)
-
     iqr = q3 - q1
 
     lower_bound = q1 - 1.5 * iqr
@@ -323,27 +368,30 @@ elif page == "Outlier Detection":
         (data["On Demand"] > upper_bound)
     ].copy()
 
-    col1, col2, col3, col4 = st.columns(4)
+    c1, c2, c3, c4 = st.columns(4)
 
-    col1.metric("Q1", f"${q1:.4f}")
-    col2.metric("Q3", f"${q3:.4f}")
-    col3.metric("IQR", f"${iqr:.4f}")
-    col4.metric("Outliers", len(outliers))
+    c1.metric("Q1", f"${q1:.4f}")
+    c2.metric("Q3", f"${q3:.4f}")
+    c3.metric("IQR", f"${iqr:.4f}")
+    c4.metric("Total Outliers", len(outliers))
 
     st.write(
-        f"Upper outlier threshold: ${upper_bound:.4f}/hour"
+        f"Upper outlier threshold: ${upper_bound:.4f}"
     )
 
     fig = px.box(
         data,
         y="On Demand",
         points="outliers",
-        title="EC2 Price Outlier Detection"
+        title="On-Demand Price Outliers"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
-    st.subheader("Detected Outliers")
+    st.subheader("Outlier Instances")
 
     st.dataframe(
         outliers[
@@ -361,54 +409,56 @@ elif page == "Outlier Detection":
     )
 
     st.download_button(
-        "Download Outliers CSV",
-        outliers.to_csv(index=False),
-        "ec2_outliers.csv",
-        "text/csv"
+        "Download Outliers",
+        data=outliers.to_csv(index=False),
+        file_name="ec2_outliers.csv",
+        mime="text/csv"
     )
 
 
 elif page == "Instance Family Comparison":
 
-    st.header("Instance Family Comparison")
+    st.header("Compare EC2 Instance Families")
 
     families = sorted(
         data["Family"].dropna().unique().tolist()
     )
 
-    default_families = [
-        family for family in ["t2", "t3"]
-        if family in families
+    default = [
+        f for f in ["t2", "t3"]
+        if f in families
     ]
 
-    selected_families = st.multiselect(
-        "Choose Instance Families",
+    selected = st.multiselect(
+        "Select Families",
         families,
-        default=default_families
+        default=default
     )
 
     filtered = data[
-        data["Family"].isin(selected_families)
+        data["Family"].isin(selected)
     ].copy()
 
     if filtered.empty:
-        st.warning("Select at least one family.")
+        st.warning("Please select instance families.")
         st.stop()
 
-    st.subheader("Instance Family Cost Distribution")
+    st.subheader("Family Cost Comparison")
 
     fig = px.box(
         filtered,
         x="Family",
         y="On Demand",
         color="Family",
-        points="outliers",
-        title="On-Demand Price by Instance Family"
+        title="On-Demand Prices by Family"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
-    st.subheader("Cost Statistics by Family")
+    st.subheader("Family Statistics")
 
     summary = (
         filtered.groupby("Family")["On Demand"]
@@ -421,7 +471,7 @@ elif page == "Instance Family Comparison":
         use_container_width=True
     )
 
-    st.subheader("On-Demand vs Reserved Pricing")
+    st.subheader("T2 / T3 On-Demand vs Reserved")
 
     comparison = filtered[
         [
@@ -434,25 +484,7 @@ elif page == "Instance Family Comparison":
     ].dropna()
 
     st.dataframe(
-        comparison.sort_values("On Demand").head(30),
-        use_container_width=True
-    )
-
-    st.subheader("Cheapest Instances")
-
-    st.dataframe(
-        filtered[
-            [
-                "Name",
-                "Family",
-                "Memory_GiB",
-                "vCPU_Count",
-                "On Demand",
-                "Monthly_Cost_730h"
-            ]
-        ].dropna(
-            subset=["On Demand"]
-        ).sort_values("On Demand").head(20),
+        comparison.sort_values("On Demand").head(20),
         use_container_width=True
     )
 
@@ -462,26 +494,24 @@ elif page == "Cost Optimization":
     st.header("EC2 Cost Optimization")
 
     st.write(
-        "Find low-cost EC2 instances based on your "
-        "minimum CPU and memory requirements."
+        "Identify low-cost instances based on minimum "
+        "CPU and memory requirements."
     )
 
-    col1, col2 = st.columns(2)
+    c1, c2 = st.columns(2)
 
-    with col1:
+    with c1:
         min_cpu = st.number_input(
             "Minimum vCPUs",
             min_value=1,
-            value=2,
-            step=1
+            value=2
         )
 
-    with col2:
+    with c2:
         min_memory = st.number_input(
             "Minimum Memory (GiB)",
             min_value=0.5,
-            value=4.0,
-            step=0.5
+            value=4.0
         )
 
     suitable = data[
@@ -492,31 +522,34 @@ elif page == "Cost Optimization":
 
     suitable = suitable.sort_values("On Demand")
 
-    st.subheader("Recommended Low-Cost Instances")
-
     if suitable.empty:
+
         st.warning(
-            "No instances match the selected requirements."
+            "No instances match your requirements."
         )
+
     else:
+
         best = suitable.iloc[0]
 
-        col1, col2, col3 = st.columns(3)
+        c1, c2, c3 = st.columns(3)
 
-        col1.metric(
+        c1.metric(
             "Lowest-Cost Instance",
             str(best["Name"])
         )
 
-        col2.metric(
+        c2.metric(
             "Hourly Cost",
             f"${best['On Demand']:.4f}"
         )
 
-        col3.metric(
-            "Monthly Cost (730 hours)",
+        c3.metric(
+            "Monthly Cost (730 Hours)",
             f"${best['Monthly_Cost_730h']:.2f}"
         )
+
+        st.subheader("Top Matching Instances")
 
         st.dataframe(
             suitable[
@@ -542,7 +575,10 @@ elif page == "Cost Optimization":
             title="10 Lowest-Cost Matching Instances"
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
 
     st.subheader("Reserved Instance Savings")
 
@@ -561,11 +597,10 @@ elif page == "Cost Optimization":
     ]
 
     if not savings.empty:
-        average_savings = savings["Savings_Percent"].mean()
 
         st.metric(
-            "Average Reserved Price Savings",
-            f"{average_savings:.2f}%"
+            "Average Reserved Savings",
+            f"{savings['Savings_Percent'].mean():.2f}%"
         )
 
         st.dataframe(
@@ -577,15 +612,15 @@ elif page == "Cost Optimization":
         )
 
     st.info(
-        "Cost comparisons use prices in the uploaded dataset. "
-        "Actual AWS prices vary by region, purchase terms, and usage. "
-        "Monthly cost assumes 730 running hours."
+        "Prices are based on the uploaded dataset. "
+        "Actual AWS prices depend on configuration, "
+        "region and purchase terms."
     )
 
 
 elif page == "Regression Prediction":
 
-    st.header("Predict EC2 Costs Using Linear Regression")
+    st.header("EC2 Cost Prediction Using Linear Regression")
 
     cleaned = data.dropna(
         subset=[
@@ -599,13 +634,16 @@ elif page == "Regression Prediction":
         (cleaned["Memory_GiB"] > 0) &
         (cleaned["vCPU_Count"] > 0) &
         (cleaned["On Demand"] >= 0)
-    ]
+    ].copy()
 
     if len(cleaned) < 10:
-        st.error("Insufficient valid data for regression.")
+        st.error("Insufficient data for regression.")
         st.stop()
 
-    X = cleaned[["Memory_GiB", "vCPU_Count"]]
+    X = cleaned[
+        ["Memory_GiB", "vCPU_Count"]
+    ]
+
     y = cleaned["On Demand"]
 
     X_train, X_test, y_train, y_test = train_test_split(
@@ -616,54 +654,67 @@ elif page == "Regression Prediction":
     )
 
     model = LinearRegression()
+
     model.fit(X_train, y_train)
 
     predictions = model.predict(X_test)
 
-    mae = mean_absolute_error(y_test, predictions)
-    mse = mean_squared_error(y_test, predictions)
+    mae = mean_absolute_error(
+        y_test, predictions
+    )
+
+    mse = mean_squared_error(
+        y_test, predictions
+    )
+
     rmse = np.sqrt(mse)
-    r2 = r2_score(y_test, predictions)
 
-    baseline = np.full(len(y_test), y_train.mean())
-    baseline_mae = mean_absolute_error(y_test, baseline)
+    r2 = r2_score(
+        y_test, predictions
+    )
 
-    st.subheader("Model Performance")
+    baseline = np.full(
+        len(y_test),
+        y_train.mean()
+    )
 
-    col1, col2, col3, col4 = st.columns(4)
+    baseline_mae = mean_absolute_error(
+        y_test, baseline
+    )
 
-    col1.metric("MAE", f"${mae:.4f}/hour")
-    col2.metric("MSE", f"{mse:.4f}")
-    col3.metric("RMSE", f"${rmse:.4f}/hour")
-    col4.metric("R² Score", f"{r2:.4f}")
+    st.subheader("Model Evaluation")
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric("MAE", f"${mae:.4f}")
+    c2.metric("MSE", f"{mse:.4f}")
+    c3.metric("RMSE", f"${rmse:.4f}")
+    c4.metric("R² Score", f"{r2:.4f}")
 
     st.metric(
         "Baseline MAE",
-        f"${baseline_mae:.4f}/hour"
+        f"${baseline_mae:.4f}"
     )
 
     if mae < baseline_mae:
-        st.success("The model outperforms the baseline.")
+        st.success(
+            "Regression performs better than baseline."
+        )
     else:
         st.warning(
-            "The model does not outperform the baseline."
+            "Regression does not outperform the baseline."
         )
 
-    st.subheader("Linear Regression Equation")
+    st.subheader("Regression Coefficients")
 
-    intercept = model.intercept_
-    memory_coef = model.coef_[0]
-    cpu_coef = model.coef_[1]
+    st.write(f"Intercept: {model.intercept_:.6f}")
 
-    st.latex(
-        rf"\hat{{y}} = {intercept:.4f}"
-        rf" + ({memory_coef:.4f})M"
-        rf" + ({cpu_coef:.4f})C"
+    st.write(
+        f"Memory Coefficient: {model.coef_[0]:.6f}"
     )
 
-    st.caption(
-        "M = Memory in GiB, C = Number of vCPUs. "
-        "The predicted value is the hourly On-Demand cost."
+    st.write(
+        f"vCPU Coefficient: {model.coef_[1]:.6f}"
     )
 
     st.subheader("Actual vs Predicted Costs")
@@ -677,23 +728,23 @@ elif page == "Regression Prediction":
         results,
         x="Actual Cost",
         y="Predicted Cost",
-        title="Actual vs Predicted On-Demand Costs"
+        title="Actual vs Predicted EC2 Costs"
     )
 
-    lower = min(
+    low = min(
         results["Actual Cost"].min(),
         results["Predicted Cost"].min()
     )
 
-    upper = max(
+    high = max(
         results["Actual Cost"].max(),
         results["Predicted Cost"].max()
     )
 
     fig.add_trace(
         go.Scatter(
-            x=[lower, upper],
-            y=[lower, upper],
+            x=[low, high],
+            y=[low, high],
             mode="lines",
             name="Perfect Prediction",
             line=dict(
@@ -703,11 +754,16 @@ elif page == "Regression Prediction":
         )
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
     st.subheader("Residual Analysis")
 
-    residuals = y_test.to_numpy() - predictions
+    residuals = (
+        y_test.to_numpy() - predictions
+    )
 
     residual_df = pd.DataFrame({
         "Predicted Cost": predictions,
@@ -718,7 +774,7 @@ elif page == "Regression Prediction":
         residual_df,
         x="Predicted Cost",
         y="Residual",
-        title="Residuals vs Predicted Prices"
+        title="Regression Residuals"
     )
 
     fig.add_hline(
@@ -727,9 +783,12 @@ elif page == "Regression Prediction":
         line_color="red"
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 
-    st.subheader("5-Fold Cross-Validation")
+    st.subheader("5-Fold Cross Validation")
 
     cv = KFold(
         n_splits=5,
@@ -747,23 +806,23 @@ elif page == "Regression Prediction":
 
     cv_mae = -cv_scores
 
-    col1, col2 = st.columns(2)
+    c1, c2 = st.columns(2)
 
-    col1.metric(
+    c1.metric(
         "Cross-Validation MAE",
-        f"${cv_mae.mean():.4f}/hour"
+        f"${cv_mae.mean():.4f}"
     )
 
-    col2.metric(
+    c2.metric(
         "CV Standard Deviation",
         f"{cv_mae.std():.4f}"
     )
 
-    st.subheader("Predict a New EC2 Instance")
+    st.subheader("Predict New EC2 Instance Cost")
 
-    col1, col2 = st.columns(2)
+    c1, c2 = st.columns(2)
 
-    with col1:
+    with c1:
         memory = st.number_input(
             "Memory (GiB)",
             min_value=0.5,
@@ -771,57 +830,65 @@ elif page == "Regression Prediction":
             step=0.5
         )
 
-    with col2:
+    with c2:
         vcpus = st.number_input(
-            "Number of vCPUs",
+            "vCPUs",
             min_value=1,
             value=2,
             step=1
         )
 
-    if st.button("Predict Hourly Cost", type="primary"):
+    if st.button(
+        "Predict Cost",
+        type="primary"
+    ):
 
         new_instance = pd.DataFrame({
             "Memory_GiB": [memory],
             "vCPU_Count": [vcpus]
         })
 
-        predicted = model.predict(new_instance)[0]
+        predicted_cost = model.predict(
+            new_instance
+        )[0]
 
         st.metric(
-            "Raw Predicted Hourly Cost",
-            f"${predicted:.4f}"
+            "Predicted Hourly Cost",
+            f"${predicted_cost:.4f}"
         )
 
-        if predicted < 0:
+        if predicted_cost < 0:
+
             st.warning(
-                "The linear regression model produced a negative "
-                "price. This is not a realistic EC2 cost and "
-                "indicates a limitation of the model."
-            )
-        else:
-            st.metric(
-                "Estimated Monthly Cost (730 hours)",
-                f"${predicted * 730:.2f}"
+                "The model predicted a negative price. "
+                "This is a limitation of linear regression, "
+                "not a realistic EC2 billing price."
             )
 
-    st.subheader("Model Prediction Results")
+        else:
+
+            st.metric(
+                "Estimated Monthly Cost",
+                f"${predicted_cost * 730:.2f}"
+            )
+
+    st.subheader("Prediction Results")
 
     st.dataframe(
-        results.head(30),
+        results,
         use_container_width=True
     )
 
     st.download_button(
-        "Download Prediction Results",
-        results.to_csv(index=False),
-        "ec2_regression_predictions.csv",
-        "text/csv"
+        "Download Regression Results",
+        data=results.to_csv(index=False),
+        file_name="ec2_regression_results.csv",
+        mime="text/csv"
     )
 
 
 st.divider()
 
 st.caption(
-    "EC2 Instance EDA Dashboard | INFO49971 Cloud Economics"
+    "INFO49971 - Cloud Economics | EC2 Instance EDA Dashboard"
 )
