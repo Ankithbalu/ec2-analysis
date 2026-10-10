@@ -1,206 +1,488 @@
-
-import re
-from pathlib import Path
-
-import numpy as np
+import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+import plotly.express as px
 
-BASE = Path(__file__).resolve().parent
-OUTPUT = BASE / "outputs"
-OUTPUT.mkdir(exist_ok=True)
+st.title("EC2 Instance EDA Dashboard")
 
-sns.set_theme(style="whitegrid")
+df = pd.read_csv("ec2dataset.csv")
 
-data = pd.read_csv(BASE / "ec2dataset.csv")
+st.subheader("Dataset Preview")
+st.dataframe(df)
 
-print("\nSTEP 2: DATASET INFORMATION")
-print("Dataset shape:", data.shape)
-data.info()
-print(data.head())
-print("\nColumns:", data.columns.tolist())
+st.subheader("Dataset Information")
 
-cost_columns = [
+col1, col2, col3 = st.columns(3)
+
+col1.metric("Number of Instances", len(df))
+col2.metric("Number of Columns", len(df.columns))
+col3.metric("Missing Values", df.isna().sum().sum())
+
+st.subheader("Dataset Structure")
+
+st.write("Columns:")
+st.write(df.columns.tolist())
+
+st.subheader("Data Types")
+st.text(df.dtypes.to_string())
+
+df["Memory_GiB"] = (
+    df["Instance Memory"]
+    .astype(str)
+    .str.extract(r"([\d.]+)")[0]
+    .astype(float)
+)
+
+df["vCPU_Count"] = (
+    df["vCPUs"]
+    .astype(str)
+    .str.extract(r"(\d+)")[0]
+    .astype(float)
+)
+
+def clean_price(value):
+    if pd.isna(value):
+        return None
+
+    value = str(value)
+
+    if "unavailable" in value.lower():
+        return None
+
+    try:
+        return float(
+            value
+            .replace("$", "")
+            .replace(" hourly", "")
+            .replace(",", "")
+            .strip()
+        )
+
+    except ValueError:
+        return None
+
+price_columns = [
     "On Demand",
     "Linux Reserved cost",
     "Linux Spot Minimum cost",
     "Windows On Demand cost",
-    "Windows Reserved cost",
+    "Windows Reserved cost"
 ]
 
-required = ["Name", "Instance Memory", "vCPUs"] + cost_columns
-missing = [c for c in required if c not in data.columns]
+for column in price_columns:
+    df[column + "_USD"] = df[column].apply(clean_price)
 
-if missing:
-    raise ValueError(f"Missing columns: {missing}")
+df["Monthly_On_Demand"] = (
+    df["On Demand_USD"] * 730
+)
 
-def extract_number(series):
-    values = series.astype("string").str.replace(",", "", regex=False)
-    numbers = values.str.extract(r"(-?\d+(?:\.\d+)?)")[0]
-    return pd.to_numeric(numbers, errors="coerce")
+df["Cost_Per_GiB"] = (
+    df["On Demand_USD"] /
+    df["Memory_GiB"]
+)
 
-for col in cost_columns:
-    data[col] = extract_number(data[col])
-    data.loc[data[col] < 0, col] = np.nan
+df["Cost_Per_vCPU"] = (
+    df["On Demand_USD"] /
+    df["vCPU_Count"]
+)
 
-data["Memory_GiB"] = extract_number(data["Instance Memory"])
-data["vCPU_Count"] = extract_number(data["vCPUs"])
+st.subheader("Monthly On-Demand Cost")
 
-print("\nSTEP 3: MISSING VALUES")
-print(data.isna().sum())
+st.dataframe(
+    df[
+        [
+            "Name",
+            "API Name",
+            "Memory_GiB",
+            "vCPU_Count",
+            "On Demand_USD",
+            "Monthly_On_Demand"
+        ]
+    ]
+)
 
-print("\nSTEP 4: SUMMARY STATISTICS")
-summary = data[cost_columns].describe()
-print(summary.round(4))
-summary.to_csv(OUTPUT / "cost_summary.csv")
+st.sidebar.header("Filters")
 
-plt.figure(figsize=(13, 6))
-sns.boxplot(data=data[cost_columns])
-plt.title("EC2 Hourly Cost Comparison")
-plt.xlabel("Pricing Type")
-plt.ylabel("Hourly Cost (USD)")
-plt.xticks(rotation=25, ha="right")
-plt.tight_layout()
-plt.savefig(OUTPUT / "01_cost_boxplot.png", dpi=200)
-plt.show()
+max_memory = float(
+    df["Memory_GiB"]
+    .dropna()
+    .max()
+)
 
-plt.figure(figsize=(12, 6))
-sns.boxplot(data=np.log1p(data[cost_columns]))
-plt.title("EC2 Hourly Cost Distribution (log1p scale)")
-plt.ylabel("log(1 + Hourly Cost)")
-plt.xticks(rotation=25, ha="right")
-plt.tight_layout()
-plt.savefig(OUTPUT / "02_log_cost_boxplot.png", dpi=200)
-plt.show()
+memory_filter = st.sidebar.slider(
+    "Maximum Memory (GiB)",
+    min_value=0.5,
+    max_value=max_memory,
+    value=max_memory
+)
 
-print("\nSTEP 6: ON-DEMAND OUTLIERS")
-prices = data["On Demand"].dropna()
-q1 = prices.quantile(0.25)
-q3 = prices.quantile(0.75)
-iqr = q3 - q1
-lower = q1 - 1.5 * iqr
-upper = q3 + 1.5 * iqr
+cpu_values = sorted(
+    df["vCPU_Count"]
+    .dropna()
+    .unique()
+    .tolist()
+)
 
-outliers = data[
-    (data["On Demand"] < lower) |
-    (data["On Demand"] > upper)
+selected_cpu = st.sidebar.multiselect(
+    "vCPU Count",
+    options=cpu_values,
+    default=cpu_values
+)
+
+network_values = sorted(
+    df["Network Performance"]
+    .dropna()
+    .astype(str)
+    .unique()
+    .tolist()
+)
+
+selected_network = st.sidebar.multiselect(
+    "Network Performance",
+    options=network_values,
+    default=network_values
+)
+
+max_price = float(
+    df["On Demand_USD"]
+    .dropna()
+    .max()
+)
+
+price_filter = st.sidebar.slider(
+    "Maximum Hourly Price ($)",
+    min_value=0.0,
+    max_value=max_price,
+    value=max_price
+)
+
+max_monthly_cost = float(
+    df["Monthly_On_Demand"]
+    .dropna()
+    .max()
+)
+
+monthly_cost_filter = st.sidebar.slider(
+    "Maximum Monthly Cost ($)",
+    min_value=0.0,
+    max_value=max_monthly_cost,
+    value=max_monthly_cost
+)
+
+filtered_df = df[
+    (df["Memory_GiB"] <= memory_filter) &
+    (df["vCPU_Count"].isin(selected_cpu)) &
+    (df["Network Performance"].astype(str).isin(selected_network)) &
+    (df["On Demand_USD"] <= price_filter) &
+    (df["Monthly_On_Demand"] <= monthly_cost_filter)
 ].copy()
 
-print("Q1:", q1)
-print("Q3:", q3)
-print("IQR:", iqr)
-print("Upper bound:", upper)
-print("Number of outliers:", len(outliers))
-print(outliers[["Name", "On Demand"]].head(20))
-outliers.to_csv(OUTPUT / "on_demand_outliers.csv", index=False)
+st.subheader("Filtered EC2 Instances")
 
-print("\nSTEP 7: RESERVED VS ON-DEMAND")
-comparison = data[
-    ["Name", "On Demand", "Linux Reserved cost"]
-].dropna().copy()
+st.write(
+    f"{len(filtered_df)} instances found"
+)
 
-comparison = comparison[
-    (comparison["On Demand"] > 0) &
-    (comparison["Linux Reserved cost"] >= 0)
+st.dataframe(filtered_df)
+
+st.subheader("EC2 Summary")
+
+col1, col2, col3, col4 = st.columns(4)
+
+col1.metric(
+    "Instances",
+    len(filtered_df)
+)
+
+if not filtered_df.empty:
+
+    col2.metric(
+        "Avg Memory",
+        f"{filtered_df['Memory_GiB'].mean():.2f} GiB"
+    )
+
+    col3.metric(
+        "Avg vCPUs",
+        f"{filtered_df['vCPU_Count'].mean():.1f}"
+    )
+
+    col4.metric(
+        "Avg Hourly Cost",
+        f"${filtered_df['On Demand_USD'].mean():.4f}"
+    )
+
+else:
+
+    col2.metric(
+        "Avg Memory",
+        "N/A"
+    )
+
+    col3.metric(
+        "Avg vCPUs",
+        "N/A"
+    )
+
+    col4.metric(
+        "Avg Hourly Cost",
+        "N/A"
+    )
+
+st.subheader("Memory Distribution")
+
+if not filtered_df.empty:
+
+    fig = px.histogram(
+        filtered_df,
+        x="Memory_GiB",
+        nbins=30,
+        title="Distribution of EC2 Memory"
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+
+else:
+
+    st.warning(
+        "No instances match the selected filters."
+    )
+
+st.subheader("vCPU Distribution")
+
+if not filtered_df.empty:
+
+    fig = px.histogram(
+        filtered_df,
+        x="vCPU_Count",
+        title="Distribution of vCPUs"
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+
+st.subheader("Memory vs vCPUs")
+
+if not filtered_df.empty:
+
+    fig = px.scatter(
+        filtered_df,
+        x="vCPU_Count",
+        y="Memory_GiB",
+        hover_name="API Name",
+        hover_data=["On Demand_USD"],
+        title="EC2 Memory vs vCPU"
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+
+st.subheader("Memory vs On-Demand Cost")
+
+chart_df = filtered_df.dropna(
+    subset=[
+        "Memory_GiB",
+        "On Demand_USD",
+        "vCPU_Count"
+    ]
+)
+
+if not chart_df.empty:
+
+    fig = px.scatter(
+        chart_df,
+        x="Memory_GiB",
+        y="On Demand_USD",
+        hover_name="API Name",
+        size="vCPU_Count",
+        title="Memory vs EC2 On-Demand Cost"
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+
+st.subheader("Lowest-Cost EC2 Instances")
+
+cheapest = (
+    filtered_df
+    .dropna(subset=["On Demand_USD"])
+    .sort_values("On Demand_USD")
+    [
+        [
+            "Name",
+            "API Name",
+            "Memory_GiB",
+            "vCPU_Count",
+            "On Demand_USD",
+            "Monthly_On_Demand"
+        ]
+    ]
+    .head(10)
+)
+
+st.dataframe(cheapest)
+
+st.subheader("Highest-Cost EC2 Instances")
+
+most_expensive = (
+    filtered_df
+    .dropna(subset=["On Demand_USD"])
+    .sort_values(
+        "On Demand_USD",
+        ascending=False
+    )
+    [
+        [
+            "Name",
+            "API Name",
+            "Memory_GiB",
+            "vCPU_Count",
+            "On Demand_USD",
+            "Monthly_On_Demand"
+        ]
+    ]
+    .head(10)
+)
+
+st.dataframe(most_expensive)
+
+st.subheader("EC2 Pricing Comparison")
+
+pricing = filtered_df[
+    [
+        "Name",
+        "API Name",
+        "On Demand_USD",
+        "Linux Reserved cost_USD",
+        "Linux Spot Minimum cost_USD",
+        "Windows On Demand cost_USD",
+        "Windows Reserved cost_USD"
+    ]
 ]
 
-comparison["Savings_Per_Hour"] = (
-    comparison["On Demand"] - comparison["Linux Reserved cost"]
+st.dataframe(pricing)
+
+st.subheader("Instance Pricing Comparison")
+
+available_instances = (
+    filtered_df["API Name"]
+    .dropna()
+    .unique()
 )
 
-comparison["Savings_Percent"] = (
-    comparison["Savings_Per_Hour"] /
-    comparison["On Demand"] * 100
-)
+if len(available_instances) > 0:
 
-print(comparison.sort_values("On Demand").head(10))
-print("\nMean savings percentage:", comparison["Savings_Percent"].mean())
-comparison.to_csv(OUTPUT / "reserved_savings.csv", index=False)
-
-plt.figure(figsize=(9, 5))
-average_prices = data[cost_columns].mean().sort_values()
-sns.barplot(x=average_prices.index, y=average_prices.values)
-plt.title("Average Hourly Price by Pricing Option")
-plt.ylabel("Average Price (USD/hour)")
-plt.xticks(rotation=25, ha="right")
-plt.tight_layout()
-plt.savefig(OUTPUT / "03_average_prices.png", dpi=200)
-plt.show()
-
-print("\nSTEP 8: INSTANCE FAMILY COMPARISON")
-
-data["Family"] = (
-    data["API Name"].astype("string")
-    .str.split(".").str[0]
-    .str.lower()
-)
-
-t2 = data[data["Family"] == "t2"]
-t3 = data[data["Family"] == "t3"]
-
-for family_name, family_data in [("T2", t2), ("T3", t3)]:
-    print(f"\n{family_name} INSTANCE SUMMARY")
-    if family_data.empty:
-        print("No instances found.")
-        continue
-
-    print(family_data[cost_columns].describe().round(4))
-
-    plt.figure(figsize=(12, 6))
-    sns.boxplot(data=family_data[cost_columns], showmeans=True)
-    plt.title(f"{family_name} Instance Cost Distribution")
-    plt.ylabel("Hourly Price (USD)")
-    plt.xticks(rotation=25, ha="right")
-    plt.tight_layout()
-    plt.savefig(OUTPUT / f"04_{family_name}_costs.png", dpi=200)
-    plt.show()
-
-family_comparison = pd.concat([t2, t3])
-
-if not family_comparison.empty:
-    print("\n10 LOWEST-COST T2/T3 INSTANCES")
-    print(
-        family_comparison[
-            ["Name", "On Demand", "Linux Reserved cost"]
-        ].dropna().sort_values("On Demand").head(10)
+    selected_instance = st.selectbox(
+        "Select an EC2 Instance",
+        available_instances
     )
 
-    plt.figure(figsize=(9, 5))
-    sns.boxplot(
-        data=family_comparison,
-        x="Family",
-        y="On Demand",
-        showmeans=True
+    instance = filtered_df[
+        filtered_df["API Name"] == selected_instance
+    ].iloc[0]
+
+    pricing_data = pd.DataFrame(
+        {
+            "Pricing Model": [
+                "On Demand",
+                "Linux Reserved",
+                "Linux Spot"
+            ],
+
+            "Hourly Cost": [
+                instance["On Demand_USD"],
+                instance["Linux Reserved cost_USD"],
+                instance["Linux Spot Minimum cost_USD"]
+            ]
+        }
     )
-    plt.title("T2 vs T3 On-Demand Cost Comparison")
-    plt.ylabel("Hourly Price (USD)")
-    plt.tight_layout()
-    plt.savefig(OUTPUT / "05_t2_vs_t3.png", dpi=200)
-    plt.show()
 
-print("\nBONUS: PRICE PER RESOURCE")
+    pricing_data = pricing_data.dropna()
 
-efficiency = data[
-    (data["On Demand"] > 0) &
-    (data["vCPU_Count"] > 0) &
-    (data["Memory_GiB"] > 0)
-].copy()
+    pricing_data["Monthly Cost"] = (
+        pricing_data["Hourly Cost"] * 730
+    )
 
-efficiency["Cost_Per_vCPU"] = (
-    efficiency["On Demand"] / efficiency["vCPU_Count"]
+    st.dataframe(pricing_data)
+
+    if not pricing_data.empty:
+
+        fig = px.bar(
+            pricing_data,
+            x="Pricing Model",
+            y="Hourly Cost",
+            title=f"Pricing Comparison: {selected_instance}"
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+else:
+
+    st.warning(
+        "No EC2 instances are available with the selected filters."
+    )
+
+st.subheader("Cost per GiB of Memory")
+
+efficiency = (
+    filtered_df
+    .dropna(subset=["Cost_Per_GiB"])
+    .sort_values("Cost_Per_GiB")
+    [
+        [
+            "Name",
+            "API Name",
+            "Memory_GiB",
+            "vCPU_Count",
+            "On Demand_USD",
+            "Cost_Per_GiB"
+        ]
+    ]
+    .head(15)
 )
-efficiency["Cost_Per_GiB"] = (
-    efficiency["On Demand"] / efficiency["Memory_GiB"]
+
+st.dataframe(efficiency)
+
+st.subheader("Cost per vCPU")
+
+cpu_efficiency = (
+    filtered_df
+    .dropna(subset=["Cost_Per_vCPU"])
+    .sort_values("Cost_Per_vCPU")
+    [
+        [
+            "Name",
+            "API Name",
+            "Memory_GiB",
+            "vCPU_Count",
+            "On Demand_USD",
+            "Cost_Per_vCPU"
+        ]
+    ]
+    .head(15)
 )
-efficiency["Monthly_Cost_730h"] = efficiency["On Demand"] * 730
 
-print(
-    efficiency[
-        ["Name", "On Demand", "Cost_Per_vCPU", "Cost_Per_GiB"]
-    ].sort_values("Cost_Per_vCPU").head(10)
+st.dataframe(cpu_efficiency)
+
+st.subheader("Download Data")
+
+csv = filtered_df.to_csv(
+    index=False
 )
 
-efficiency.to_csv(OUTPUT / "instance_efficiency.csv", index=False)
-
-print("\nPART 1 COMPLETED. Results saved in outputs folder.")
+st.download_button(
+    label="Download Filtered Dataset",
+    data=csv,
+    file_name="filtered_ec2_instances.csv",
+    mime="text/csv"
+)
