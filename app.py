@@ -176,7 +176,149 @@ page = st.sidebar.radio(
 )
 
 st.sidebar.divider()
+st.sidebar.header("Filters")
+
+# Keep a copy of the complete dataset, so filters can be reset at any time.
+full_data = data.copy()
+
+# Read the network performance labels without requiring every row to have a value.
+if "Network Performance" in full_data.columns:
+    network_labels = (
+        full_data["Network Performance"]
+        .fillna("Unknown")
+        .astype(str)
+        .str.strip()
+        .replace("", "Unknown")
+    )
+else:
+    network_labels = pd.Series("Unknown", index=full_data.index)
+
+
+def make_slider_max(values, increment):
+    """Round the dataset maximum up to a valid positive slider limit."""
+    maximum = values.max(skipna=True)
+    if pd.isna(maximum) or not np.isfinite(maximum):
+        return float(increment)
+    return max(
+        float(increment),
+        float(np.ceil(float(maximum) / increment) * increment)
+    )
+
+
+memory_limit = make_slider_max(full_data["Memory_GiB"], 0.5)
+hourly_limit = make_slider_max(full_data["On Demand"], 0.01)
+monthly_limit = make_slider_max(full_data["Monthly_Cost_730h"], 0.01)
+
+all_vcpus = sorted(
+    float(v) for v in full_data["vCPU_Count"].dropna().unique()
+)
+all_networks = sorted(
+    network_labels.unique().tolist(), key=lambda name: name.casefold()
+)
+
+filter_defaults = {
+    "filter_max_memory": memory_limit,
+    "filter_vcpus": all_vcpus,
+    "filter_network": all_networks,
+    "filter_max_hourly": hourly_limit,
+    "filter_max_monthly": monthly_limit,
+}
+
+for filter_key, default_value in filter_defaults.items():
+    if filter_key not in st.session_state:
+        st.session_state[filter_key] = default_value
+
+# Retain valid selections if the dataset changes while Streamlit is running.
+for key, upper_limit in [
+    ("filter_max_memory", memory_limit),
+    ("filter_max_hourly", hourly_limit),
+    ("filter_max_monthly", monthly_limit),
+]:
+    st.session_state[key] = min(
+        upper_limit, max(0.0, float(st.session_state[key]))
+    )
+st.session_state["filter_vcpus"] = [
+    v for v in st.session_state["filter_vcpus"] if v in all_vcpus
+]
+st.session_state["filter_network"] = [
+    v for v in st.session_state["filter_network"] if v in all_networks
+]
+
+max_memory = st.sidebar.slider(
+    "Maximum Memory (GiB)",
+    min_value=0.0,
+    max_value=memory_limit,
+    step=0.5,
+    format="%.2f",
+    key="filter_max_memory",
+)
+
+selected_vcpus = st.sidebar.multiselect(
+    "vCPU Count",
+    options=all_vcpus,
+    key="filter_vcpus",
+)
+
+selected_networks = st.sidebar.multiselect(
+    "Network Performance",
+    options=all_networks,
+    key="filter_network",
+)
+
+max_hourly = st.sidebar.slider(
+    "Maximum Hourly Price ($)",
+    min_value=0.0,
+    max_value=hourly_limit,
+    step=0.01,
+    format="%.2f",
+    key="filter_max_hourly",
+)
+
+max_monthly = st.sidebar.slider(
+    "Maximum Monthly Cost ($)",
+    min_value=0.0,
+    max_value=monthly_limit,
+    step=0.01,
+    format="%.2f",
+    key="filter_max_monthly",
+)
+
+
+def reset_ec2_filters():
+    for filter_key, default_value in filter_defaults.items():
+        st.session_state[filter_key] = default_value
+
+
+st.sidebar.button("Reset Filters", on_click=reset_ec2_filters)
+
+# The defaults keep every original row, including rows with missing data.
+# A filter removes rows only after the user restricts its value.
+keep = pd.Series(True, index=full_data.index)
+
+if max_memory < memory_limit - 1e-8:
+    keep &= full_data["Memory_GiB"].le(max_memory).fillna(False)
+
+if set(selected_vcpus) != set(all_vcpus):
+    keep &= full_data["vCPU_Count"].isin(selected_vcpus)
+
+if set(selected_networks) != set(all_networks):
+    keep &= network_labels.isin(selected_networks)
+
+if max_hourly < hourly_limit - 1e-8:
+    keep &= full_data["On Demand"].le(max_hourly).fillna(False)
+
+if max_monthly < monthly_limit - 1e-8:
+    keep &= full_data["Monthly_Cost_730h"].le(max_monthly).fillna(False)
+
+data = full_data.loc[keep].copy()
+
+st.sidebar.caption(f"Matching instances: {len(data):,} / {len(full_data):,}")
+st.sidebar.divider()
 st.sidebar.caption("INFO49971 - Cloud Economics")
+
+if data.empty:
+    st.warning("No EC2 instances match these filters. Select Reset Filters to see all instances.")
+    st.stop()
 
 
 if page == "Dataset Overview":
